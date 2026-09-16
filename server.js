@@ -140,7 +140,9 @@ function bracketSerializer(params) {
 async function fetchMessageEvents(leadIds, from, to) {
   if (leadIds.length === 0) return [];
   const events = [];
-  const CHUNK = 10; // на случай, если сделок много — режем на пачки
+  // amoCRM ограничивает filter[entity_id][] максимум 10 значениями за запрос —
+  // при большем количестве отдаёт 400 "More params given than allowed"
+  const CHUNK = 10;
   for (let i = 0; i < leadIds.length; i += CHUNK) {
     const chunk = leadIds.slice(i, i + CHUNK);
     let page = 1;
@@ -275,6 +277,41 @@ app.get('/api/stats', async (req, res) => {
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+// Диагностика: показывает сырые данные, которые видит сервер,
+// чтобы понять, почему может быть 0 в "Среднем времени первого ответа".
+// После того как разберёмся — можно смело убрать этот роут.
+app.get('/api/debug', async (req, res) => {
+  try {
+    const { from, to, label } = yesterdayRangeUnix(TIMEZONE);
+    const leads = await fetchYesterdayLeads(from, to);
+
+    const employeeLeads = leads.filter((l) =>
+      employeeIds.includes(l.responsible_user_id)
+    );
+
+    const leadIds = leads.map((l) => l.id);
+    const events = await fetchMessageEvents(leadIds, from, to);
+
+    res.json({
+      date: label,
+      totalLeads: leads.length,
+      employeeLeadCount: employeeLeads.length,
+      employeeLeads: employeeLeads.map((l) => ({
+        id: l.id,
+        responsible_user_id: l.responsible_user_id,
+        created_at: l.created_at,
+      })),
+      eventCount: events.length,
+      sampleEvents: events.slice(0, 5),
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: 'debug failed',
+      details: err?.response?.data || err.message,
+    });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`CS response widget backend слушает порт ${PORT}`);
