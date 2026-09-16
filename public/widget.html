@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8" />
-<title>CS: обращения по часам и время ответа</title>
+<title>CS: обращения по часам и время до взятия в работу</title>
 <style>
   :root {
     --bg: #12233f;
@@ -97,10 +97,10 @@
   <div class="chart" id="chart"></div>
   <div class="hours" id="hours"></div>
 
-  <h1>Среднее время первого ответа</h1>
+  <h1>Среднее время до взятия в работу</h1>
   <table id="table">
     <thead>
-      <tr><th>Сотрудник</th><th class="num">Обращений с ответом</th><th class="num">Среднее время</th></tr>
+      <tr><th>Сотрудник</th><th class="num">Взято в работу</th><th class="num">Среднее время</th></tr>
     </thead>
     <tbody id="tbody">
       <tr><td colspan="3" class="loading">загрузка…</td></tr>
@@ -165,8 +165,8 @@
           (e) => `
         <tr>
           <td>${e.name}</td>
-          <td class="num">${e.repliedCount}</td>
-          <td class="num">${formatDuration(e.avgResponseSeconds)}</td>
+          <td class="num">${e.pickedUpCount}</td>
+          <td class="num">${formatDuration(e.avgPickupSeconds)}</td>
         </tr>`
         )
         .join("");
