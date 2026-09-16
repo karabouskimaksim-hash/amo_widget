@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>CS: обращения по часам и время ответа</title>
+<style>
+  :root {
+    --bg: #12233f;
+    --card: #16294a;
+    --accent: #f2b84b;
+    --text: #ffffff;
+    --muted: #9fb0c9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 14px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    font-size: 13px;
+  }
+  h1 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  .date {
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 14px;
+  }
+  .chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 90px;
+    margin-bottom: 6px;
+  }
+  .bar {
+    flex: 1;
+    background: var(--accent);
+    border-radius: 2px 2px 0 0;
+    min-height: 1px;
+    position: relative;
+  }
+  .bar:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #000;
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+  .hours {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 18px;
+  }
+  .hours span {
+    flex: 1;
+    text-align: center;
+    font-size: 9px;
+    color: var(--muted);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  th, td {
+    text-align: left;
+    padding: 5px 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  th {
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 11px;
+  }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); font-style: italic; }
+  .error { color: #ff8a8a; }
+  .loading { color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>Обращения по часам — Customer Success</h1>
+  <div class="date" id="dateLabel">загрузка…</div>
+  <div class="chart" id="chart"></div>
+  <div class="hours" id="hours"></div>
+
+  <h1>Среднее время первого ответа</h1>
+  <table id="table">
+    <thead>
+      <tr><th>Сотрудник</th><th class="num">Обращений с ответом</th><th class="num">Среднее время</th></tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="3" class="loading">загрузка…</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+    // Если backend на другом домене/порту, чем сам виджет — впишите сюда
+    // полный адрес, например "https://your-backend.example.com/api/stats"
+    const API_URL = "/api/stats";
+
+    function formatDuration(seconds) {
+      if (seconds === null || seconds === undefined) return "—";
+      const h = Math.floor(seconds / 3600);
+      const m = Math.round((seconds % 3600) / 60);
+      if (h > 0) return `${h} ч ${m} мин`;
+      return `${m} мин`;
+    }
+
+    async function load() {
+      try {
+        const res = await fetch(API_URL, { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        render(data);
+      } catch (e) {
+        document.getElementById("dateLabel").innerHTML =
+          `<span class="error">Не удалось загрузить данные: ${e.message}</span>`;
+        document.getElementById("tbody").innerHTML =
+          `<tr><td colspan="3" class="error">Ошибка загрузки</td></tr>`;
+      }
+    }
+
+    function render(data) {
+      document.getElementById("dateLabel").textContent =
+        `${data.date} · всего обращений: ${data.totalLeads} · TZ ${data.timezone}`;
+
+      const chart = document.getElementById("chart");
+      const hours = document.getElementById("hours");
+      chart.innerHTML = "";
+      hours.innerHTML = "";
+      const max = Math.max(1, ...data.hourly);
+      data.hourly.forEach((count, h) => {
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.style.height = Math.max(2, (count / max) * 100) + "%";
+        bar.setAttribute("data-tip", `${h}:00 — ${count}`);
+        chart.appendChild(bar);
+
+        const label = document.createElement("span");
+        label.textContent = h % 3 === 0 ? h : "";
+        hours.appendChild(label);
+      });
+
+      const tbody = document.getElementById("tbody");
+      if (!data.employees.length) {
+        tbody.innerHTML = `<tr><td colspan="3" class="empty">Нет данных</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = data.employees
+        .map(
+          (e) => `
+        <tr>
+          <td>${e.name}</td>
+          <td class="num">${e.repliedCount}</td>
+          <td class="num">${formatDuration(e.avgResponseSeconds)}</td>
+        </tr>`
+        )
+        .join("");
+    }
+
+    load();
+    // обновляем каждые 5 минут, пока виджет открыт
+    setInterval(load, 5 * 60 * 1000);
+  </script>
+</body>
+</html>
