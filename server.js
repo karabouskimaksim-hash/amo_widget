@@ -3,12 +3,20 @@
  * -----------------------------------------------------------------------
  * Считает для воронки Customer Success за вчера:
  *   1) сколько обращений (сделок) создано в каждый час суток
- *   2) среднее время первого ответа (от первого входящего сообщения
- *      до первого следующего исходящего) — по каждому из 4 сотрудников
+ *   2) среднее время ДО ВЗЯТИЯ В РАБОТУ (от создания сделки до первой
+ *      смены этапа — то есть момента, когда сотрудник сдвинул её
+ *      с «Взять в работу» дальше) — по каждому из 4 сотрудников
+ *
+ * ВАЖНО: это НЕ время ответа на сообщение клиенту. Настоящее время
+ * ответа требует данных из отдельной Chats API amoCRM (сообщения
+ * там — не сделки и не обычные события, а объекты в другой системе,
+ * amojo.amocrm.ru, с отдельной авторизацией). Это уже другой уровень
+ * интеграции. Метрика ниже — рабочая замена на основе тех же данных,
+ * что мы и так получаем: "сколько времени сделка провисела в
+ * необработанном виде, прежде чем её взяли в работу".
  *
  * Данные не хранятся — при каждом запросе виджета сервер идёт в amoCRM
- * API v4 и считает всё заново. Для такого объёма (десятки сделок в день)
- * это быстро и не требует базы данных.
+ * API v4 и считает всё заново.
  *
  * ЧТО НУЖНО ПРОВЕРИТЬ/ПОДСТАВИТЬ ПЕРЕД ЗАПУСКОМ — см. README.md и .env.example
  * -----------------------------------------------------------------------
@@ -56,7 +64,6 @@ const api = axios.create({
 // ---------------------------------------------------------------------
 function yesterdayRangeUnix(tz) {
   const now = new Date();
-  // сегодняшняя полночь в TZ, затем минус сутки
   const fmt = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz,
     year: 'numeric',
@@ -84,35 +91,6 @@ function hourInTz(unixSeconds, tz) {
   return parseInt(fmt.format(d), 10) % 24;
 }
 
-// ---------------------------------------------------------------------
-// 1) Сделки, созданные вчера в воронке — источник для часовой разбивки
-//    и список lead_id для сопоставления с событиями переписки
-// ---------------------------------------------------------------------
-async function fetchYesterdayLeads(from, to) {
-  const leads = [];
-  let page = 1;
-  // amoCRM отдаёт максимум 250 на страницу
-  while (true) {
-    const { data } = await api.get('/leads', {
-      params: {
-        filter: {
-          pipeline_id: PIPELINE_ID,
-          created_at: { from, to },
-        },
-        limit: 250,
-        page,
-      },
-      paramsSerializer: bracketSerializer,
-    });
-    const batch = data?._embedded?.leads || [];
-    leads.push(...batch);
-    if (batch.length < 250) break;
-    page += 1;
-    if (page > 20) break; // защита от бесконечного цикла
-  }
-  return leads;
-}
-
 // amoCRM ждёт filter[pipeline_id]=.. filter[created_at][from]=.. в query,
 // axios по умолчанию так вложенные объекты не сериализует — делаем сами.
 function bracketSerializer(params) {
@@ -134,14 +112,42 @@ function bracketSerializer(params) {
 }
 
 // ---------------------------------------------------------------------
-// 2) События переписки (incoming_chat_message / outgoing_chat_message)
-//    по конкретным сделкам — для расчёта времени первого ответа
+// 1) Сделки, созданные вчера в воронке — источник для часовой разбивки
+//    и список lead_id для сопоставления с событиями смены этапа
 // ---------------------------------------------------------------------
-async function fetchMessageEvents(leadIds, from, to) {
+async function fetchYesterdayLeads(from, to) {
+  const leads = [];
+  let page = 1;
+  while (true) {
+    const { data } = await api.get('/leads', {
+      params: {
+        filter: {
+          pipeline_id: PIPELINE_ID,
+          created_at: { from, to },
+        },
+        limit: 250,
+        page,
+      },
+      paramsSerializer: bracketSerializer,
+    });
+    const batch = data?._embedded?.leads || [];
+    leads.push(...batch);
+    if (batch.length < 250) break;
+    page += 1;
+    if (page > 20) break; // защита от бесконечного цикла
+  }
+  return leads;
+}
+
+// ---------------------------------------------------------------------
+// 2) События определённых типов по конкретным сделкам.
+//    amoCRM ограничивает filter[entity_id][] максимум 10 значениями
+//    за запрос — при большем количестве отдаёт 400 "More params given
+//    than allowed", поэтому режем на пачки по 10.
+// ---------------------------------------------------------------------
+async function fetchEventsByType(leadIds, types, from, to) {
   if (leadIds.length === 0) return [];
   const events = [];
-  // amoCRM ограничивает filter[entity_id][] максимум 10 значениями за запрос —
-  // при большем количестве отдаёт 400 "More params given than allowed"
   const CHUNK = 10;
   for (let i = 0; i < leadIds.length; i += CHUNK) {
     const chunk = leadIds.slice(i, i + CHUNK);
@@ -150,10 +156,10 @@ async function fetchMessageEvents(leadIds, from, to) {
       const { data } = await api.get('/events', {
         params: {
           filter: {
-            type: ['incoming_chat_message', 'outgoing_chat_message'],
+            type: types,
             entity: 'lead',
             entity_id: chunk,
-            created_at: { from, to: to + 6 * 3600 }, // +6ч запаса на ответ после полуночи
+            created_at: { from, to: to + 6 * 3600 }, // +6ч запаса после полуночи
           },
           limit: 250,
           page,
@@ -205,16 +211,27 @@ async function computeStats() {
     hourly[h] += 1;
   });
 
-  // --- среднее время первого ответа, по сотрудникам ---
-  const leadIds = leads.map((l) => l.id);
-  const events = await fetchMessageEvents(leadIds, from, to);
+  // --- среднее время до взятия в работу, по сотрудникам ---
+  // считаем только по сделкам наших 4 сотрудниц
+  const employeeLeads = leads.filter((l) => employeeIds.includes(l.responsible_user_id));
+  const employeeLeadIds = employeeLeads.map((l) => l.id);
 
-  // группируем события по сделке, сортируем по времени
-  const byLead = new Map();
-  events.forEach((ev) => {
+  const statusEvents = await fetchEventsByType(
+    employeeLeadIds,
+    ['lead_status_changed'],
+    from,
+    to
+  );
+
+  // группируем по сделке, берём САМОЕ РАННЕЕ изменение этапа —
+  // это и есть момент, когда сделку сдвинули с "Взять в работу"
+  const firstStatusChangeByLead = new Map();
+  statusEvents.forEach((ev) => {
     const leadId = ev.entity_id;
-    if (!byLead.has(leadId)) byLead.set(leadId, []);
-    byLead.get(leadId).push(ev);
+    const existing = firstStatusChangeByLead.get(leadId);
+    if (!existing || ev.created_at < existing.created_at) {
+      firstStatusChangeByLead.set(leadId, ev);
+    }
   });
 
   const namesMap = await resolveUserNames(employeeIds);
@@ -223,22 +240,12 @@ async function computeStats() {
     perEmployee[id] = { name: namesMap[id] || `#${id}`, deltas: [] };
   });
 
-  byLead.forEach((evList, leadId) => {
-    const lead = leadById.get(leadId);
-    if (!lead) return;
-    const respId = lead.responsible_user_id;
-    if (!employeeIds.includes(respId)) return; // считаем только наших 4
-
-    evList.sort((a, b) => a.created_at - b.created_at);
-    const firstIn = evList.find((e) => e.type === 'incoming_chat_message');
-    if (!firstIn) return;
-    const firstOutAfter = evList.find(
-      (e) => e.type === 'outgoing_chat_message' && e.created_at > firstIn.created_at
-    );
-    if (!firstOutAfter) return; // ещё не ответили
-
-    const deltaSeconds = firstOutAfter.created_at - firstIn.created_at;
-    perEmployee[respId].deltas.push(deltaSeconds);
+  employeeLeads.forEach((lead) => {
+    const firstChange = firstStatusChangeByLead.get(lead.id);
+    if (!firstChange) return; // ещё не сдвигали с "Взять в работу"
+    const deltaSeconds = firstChange.created_at - lead.created_at;
+    if (deltaSeconds < 0) return; // защита от аномалий
+    perEmployee[lead.responsible_user_id].deltas.push(deltaSeconds);
   });
 
   const employeeStats = employeeIds.map((id) => {
@@ -247,7 +254,7 @@ async function computeStats() {
       deltas.length > 0
         ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length)
         : null;
-    return { id, name, repliedCount: deltas.length, avgResponseSeconds: avg };
+    return { id, name, pickedUpCount: deltas.length, avgPickupSeconds: avg };
   });
 
   return {
@@ -278,44 +285,20 @@ app.get('/api/stats', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Диагностика: показывает сырые данные, которые видит сервер,
-// чтобы понять, почему может быть 0 в "Среднем времени первого ответа".
-// После того как разберёмся — можно смело убрать этот роут.
+// Диагностика: сырые данные для отладки. Можно оставить — не мешает.
 app.get('/api/debug', async (req, res) => {
   try {
     const { from, to, label } = yesterdayRangeUnix(TIMEZONE);
     const leads = await fetchYesterdayLeads(from, to);
-
-    const employeeLeads = leads.filter((l) =>
-      employeeIds.includes(l.responsible_user_id)
-    );
-
-    const leadIds = leads.map((l) => l.id);
-    const events = await fetchMessageEvents(leadIds, from, to);
-
-    // Без фильтра по типу — чтобы увидеть, какие типы событий вообще
-    // существуют по этим сделкам (может, переписка логируется иначе).
+    const employeeLeads = leads.filter((l) => employeeIds.includes(l.responsible_user_id));
     const employeeLeadIds = employeeLeads.map((l) => l.id);
-    const anyEvents = [];
-    for (let i = 0; i < employeeLeadIds.length; i += 10) {
-      const chunk = employeeLeadIds.slice(i, i + 10);
-      const { data } = await api.get('/events', {
-        params: {
-          filter: {
-            entity: 'lead',
-            entity_id: chunk,
-            created_at: { from, to: to + 6 * 3600 },
-          },
-          limit: 250,
-        },
-        paramsSerializer: bracketSerializer,
-      });
-      anyEvents.push(...(data?._embedded?.events || []));
-    }
-    const typeTally = {};
-    anyEvents.forEach((e) => {
-      typeTally[e.type] = (typeTally[e.type] || 0) + 1;
-    });
+
+    const statusEvents = await fetchEventsByType(
+      employeeLeadIds,
+      ['lead_status_changed'],
+      from,
+      to
+    );
 
     res.json({
       date: label,
@@ -326,13 +309,8 @@ app.get('/api/debug', async (req, res) => {
         responsible_user_id: l.responsible_user_id,
         created_at: l.created_at,
       })),
-      eventCount: events.length,
-      sampleEvents: events.slice(0, 5),
-      anyEventsNoTypeFilter: {
-        totalCount: anyEvents.length,
-        typeTally,
-        sample: anyEvents.slice(0, 5),
-      },
+      statusChangeEventCount: statusEvents.length,
+      sampleStatusEvents: statusEvents.slice(0, 5),
     });
   } catch (err) {
     res.status(500).json({
