@@ -140,7 +140,7 @@ function bracketSerializer(params) {
 async function fetchMessageEvents(leadIds, from, to) {
   if (leadIds.length === 0) return [];
   const events = [];
-  const CHUNK = 50; // на случай, если сделок много — режем на пачки
+  const CHUNK = 10; // на случай, если сделок много — режем на пачки
   for (let i = 0; i < leadIds.length; i += CHUNK) {
     const chunk = leadIds.slice(i, i + CHUNK);
     let page = 1;
