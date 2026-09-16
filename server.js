@@ -293,6 +293,30 @@ app.get('/api/debug', async (req, res) => {
     const leadIds = leads.map((l) => l.id);
     const events = await fetchMessageEvents(leadIds, from, to);
 
+    // Без фильтра по типу — чтобы увидеть, какие типы событий вообще
+    // существуют по этим сделкам (может, переписка логируется иначе).
+    const employeeLeadIds = employeeLeads.map((l) => l.id);
+    const anyEvents = [];
+    for (let i = 0; i < employeeLeadIds.length; i += 10) {
+      const chunk = employeeLeadIds.slice(i, i + 10);
+      const { data } = await api.get('/events', {
+        params: {
+          filter: {
+            entity: 'lead',
+            entity_id: chunk,
+            created_at: { from, to: to + 6 * 3600 },
+          },
+          limit: 250,
+        },
+        paramsSerializer: bracketSerializer,
+      });
+      anyEvents.push(...(data?._embedded?.events || []));
+    }
+    const typeTally = {};
+    anyEvents.forEach((e) => {
+      typeTally[e.type] = (typeTally[e.type] || 0) + 1;
+    });
+
     res.json({
       date: label,
       totalLeads: leads.length,
@@ -304,6 +328,11 @@ app.get('/api/debug', async (req, res) => {
       })),
       eventCount: events.length,
       sampleEvents: events.slice(0, 5),
+      anyEventsNoTypeFilter: {
+        totalCount: anyEvents.length,
+        typeTally,
+        sample: anyEvents.slice(0, 5),
+      },
     });
   } catch (err) {
     res.status(500).json({
