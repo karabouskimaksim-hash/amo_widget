@@ -320,6 +320,30 @@ app.get('/api/debug', async (req, res) => {
   }
 });
 
+// ВРЕМЕННО: сырой ответ по одному сотруднику + по аккаунту — проверяем,
+// нет ли недокументированных полей про онлайн-статус/время в системе.
+// Можно удалить после проверки.
+app.get('/api/debug-user-raw', async (req, res) => {
+  try {
+    const userId = req.query.id || employeeIds[0];
+    const [userRes, accountRes] = await Promise.all([
+      api.get(`/users/${userId}`),
+      api.get('/account', {
+        params: { with: 'amojo_id,amojo_rights,users_groups,task_types,version,entity_names,datetime_settings' },
+      }),
+    ]);
+    res.json({
+      user: userRes.data,
+      account: accountRes.data,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: 'debug-user-raw failed',
+      details: err?.response?.data || err.message,
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`CS response widget backend слушает порт ${PORT}`);
 });
